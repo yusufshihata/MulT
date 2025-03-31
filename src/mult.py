@@ -15,6 +15,8 @@ class TempConv(nn.Module):
 class PositionalEncoding(nn.Module):
     def __init__(self, seq_len: int, feature_dim: int):
         super(PositionalEncoding, self).__init__()
+        self.seq_len = seq_len
+        self.feature_dim = feature_dim
         pe = torch.zeros(seq_len, feature_dim)
         position = torch.arange(0, seq_len, dtype=torch.float).unsqueeze(1)
         div_term = torch.exp(
@@ -28,6 +30,7 @@ class PositionalEncoding(nn.Module):
         self.register_buffer('pe', pe)
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        assert x.shape == torch.Size([self.seq_len, self.feature_dim]), "Vector Shape is incorrect"
         return x + self.pe
 
 class CrossModalityAttention(nn.Module):
@@ -44,9 +47,4 @@ class SelfAttention(nn.Module):
     def forward(self, x):
         return x
 
-if __name__ == "__main__":
-    x = torch.ones(1, 100, 256)
-    convProj = TempConv()
-    posenc = PositionalEncoding(100, 256)
-    print(posenc(convProj(x)).shape)
 
