@@ -1,6 +1,7 @@
 import math
 import torch
 import torch.nn as nn
+from typing import List
 
 class TempConv(nn.Module):
     def __init__(self, kernel_size: int = 3, channels: int = 1):
@@ -33,12 +34,16 @@ class PositionalEncoding(nn.Module):
         assert x.shape == torch.Size([self.seq_len, self.feature_dim]), "Vector Shape is incorrect"
         return x + self.pe
 
-class CrossModalityAttention(nn.Module):
-    def __init__(self):
-        super(CrossModalityAttention, self).__init__()
+class CrossModalTransformer(nn.Module):
+    def __init__(self, primary_in_shape: List[int], secondary_in_shape: List[int]):
+        super(CrossModalTransformer, self).__init__()
+        self.primary_ln = nn.LayerNorm(primary_in_shape)
+        self.secondary_ln = nn.LayerNorm(secondary_in_shape)
 
-    def forward(self, x):
-        return x
+    def forward(self, primary: torch.Tensor, secondary: torch.Tensor) -> torch.Tensor:
+        primary = self.primary_ln(primary)
+        secondary = self.secondary_ln(secondary)
+        return primary
 
 class SelfAttention(nn.Module):
     def __init__(self):
