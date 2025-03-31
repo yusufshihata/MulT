@@ -35,21 +35,30 @@ class PositionalEncoding(nn.Module):
         return x + self.pe
 
 class CrossModalTransformer(nn.Module):
-    def __init__(self, primary_in_shape: List[int], secondary_in_shape: List[int]):
+    def __init__(self, primary_in_shape: List[int], secondary_in_shape: List[int], primary_feature_dim: int, secondary_feature_dim: int, dims: int):
         super(CrossModalTransformer, self).__init__()
+        self.dims = dims
         self.primary_ln = nn.LayerNorm(primary_in_shape)
         self.secondary_ln = nn.LayerNorm(secondary_in_shape)
+        self.primary_proj = nn.Linear(in_features=primary_feature_dim, out_features=dims)
+        self.secondary_proj = nn.Linear(in_features=secondary_feature_dim, out_features=dims*2)
+        self.softmax = nn.Softmax()
+
+    def attention(self, Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor) -> torch.Tensor:
+        atten = (Q @ K.transpose(-1, -2)) / math.sqrt(self.dims)
+        atten = self.softmax(atten)
+        return atten * V
 
     def forward(self, primary: torch.Tensor, secondary: torch.Tensor) -> torch.Tensor:
         primary = self.primary_ln(primary)
         secondary = self.secondary_ln(secondary)
-        return primary
+        Q = self.primary_proj(primary)
+        KV = self.secondary_proj(secondary)
+        K, V = torch.split(KV, KV.size(1) // 2, dim=1)
 
-class SelfAttention(nn.Module):
-    def __init__(self):
-        super(SelfAttention, self).__init__()
+        atten = self.attention(Q, K, V)
+        return atten + primary
 
-    def forward(self, x):
-        return x
-
+if __name__ == "__main__":
+    pass
 
