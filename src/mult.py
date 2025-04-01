@@ -35,19 +35,18 @@ class PositionalEncoding(nn.Module):
         return x + self.pe
 
 class CrossModalTransformerLayer(nn.Module):
-    def __init__(self, primary_in_shape: List[int], secondary_in_shape: List[int], dims: int):
+    def __init__(self, primary_in_shape, secondary_in_shape, dims: int):
         super(CrossModalTransformerLayer, self).__init__()
         self.dims = dims
         self.primary_ln = nn.LayerNorm(primary_in_shape)
         self.secondary_ln = nn.LayerNorm(secondary_in_shape)
         self.primary_proj = nn.Linear(in_features=primary_in_shape[1], out_features=dims)
-        self.secondary_proj = nn.Linear(in_features=primary_in_shape[1], out_features=dims*2)
+        self.secondary_proj = nn.Linear(in_features=secondary_in_shape[1], out_features=dims*2)
         self.softmax = nn.Softmax()
 
     def attention(self, Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor) -> torch.Tensor:
         atten = (Q @ K.transpose(-1, -2)) / math.sqrt(self.dims)
         atten = self.softmax(atten)
-        print(atten.shape, V.shape)
         return atten @ V
 
     def forward(self, primary: torch.Tensor, secondary: torch.Tensor) -> torch.Tensor:
@@ -59,6 +58,15 @@ class CrossModalTransformerLayer(nn.Module):
 
         atten = self.attention(Q, K, V)
 
-        return atten + primary
+        return atten + Q
 
+class CrossModalTransformer(nn.Module):
+    def __init__(self, num_layers: int = 4):
+        super(CrossModalTransformer, self).__init__()
+        self.num_layers = num_layers
+
+    def forward(self, primary, secondary):
+        for _ in range(self.num_layers):
+            primary = CrossModalTransformerLayer(primary.shape, secondary.shape, 1024)(primary, secondary)
+        return primary
 
