@@ -1,16 +1,26 @@
-import math
 import torch
 import torch.nn as nn
+import math
 
 class TempConv(nn.Module):
     def __init__(self, kernel_size: int = 3, channels: int = 1):
         super(TempConv, self).__init__()
-        self.conv1d = nn.Conv1d(in_channels=channels, out_channels=channels, kernel_size=kernel_size, padding=kernel_size//2)
+        self.conv1d = nn.Conv1d(
+            in_channels=channels,
+            out_channels=channels,
+            kernel_size=kernel_size,
+            padding=kernel_size // 2
+        )
 
-    def forward(self, x):
-        x = x.unsqueeze(0).permute(1, 0, 2)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.dim() != 3:
+             raise ValueError(f"Input tensor must have 3 dimensions (batch, seq_len, channels), got {x.dim()}")
+
+        x = x.permute(0, 2, 1)
         x = self.conv1d(x)
-        return x.permute(1, 0, 2).squeeze(0)
+        x = x.permute(0, 2, 1)
+
+        return x
 
 class PositionalEncoding(nn.Module):
     def __init__(self, feature_dim: int, seq_len: int, dropout: float = 0.1):
@@ -43,7 +53,7 @@ class PositionalEncoding(nn.Module):
 class CrossModalTransformerLayer(nn.Module):
     def __init__(self, dims: int, num_heads: int, primary_feature_dim: int, secondary_feature_dim: int, dropout: float = 0.1):
         super(CrossModalTransformerLayer, self).__init__()
-        
+
         if dims % num_heads != 0:
             raise ValueError(f"dims ({dims}) must be divisible by num_heads ({num_heads})")
 
@@ -51,69 +61,95 @@ class CrossModalTransformerLayer(nn.Module):
         self.num_heads = num_heads
         self.head_dim = dims // num_heads
 
-        self.primary_ln = nn.LayerNorm(dims)
-        self.secondary_ln = nn.LayerNorm(dims)
+        self.q_proj = nn.Linear(dims, dims)
+        self.kv_proj = nn.Linear(dims, dims * 2)
 
-        self.primary_proj = nn.Linear(primary_feature_dim, dims)
-        self.secondary_proj = nn.Linear(secondary_feature_dim, dims * 2)
+        self.is_first_layer = (primary_feature_dim != dims) or (secondary_feature_dim != dims)
+        if self.is_first_layer:
+            self.primary_proj_first = nn.Linear(primary_feature_dim, dims)
+            self.secondary_proj_first = nn.Linear(secondary_feature_dim, dims * 2)
+
+
+        self.attn_norm = nn.LayerNorm(dims)
+        self.kv_norm = nn.LayerNorm(dims)
 
         self.softmax = nn.Softmax(dim=-1)
         self.scale = math.sqrt(self.head_dim)
 
         self.out_proj = nn.Linear(dims, dims)
-        self.dropout = nn.Dropout(dropout)
+        self.attn_dropout = nn.Dropout(dropout)
 
+        self.ffn_norm = nn.LayerNorm(dims)
         self.ffn = nn.Sequential(
-            nn.LayerNorm(dims),
             nn.Linear(dims, dims * 4),
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(dims * 4, dims),
-            nn.Dropout(dropout)
         )
-
+        self.ffn_dropout = nn.Dropout(dropout)
 
     def forward(self, primary: torch.Tensor, secondary: torch.Tensor) -> torch.Tensor:
         batch_size, seq_len_p, _ = primary.shape
         _, seq_len_s, _ = secondary.shape
 
-        q_proj = self.primary_proj(primary)
+        residual_p = primary
+
+        if self.is_first_layer:
+            primary_for_q = self.primary_proj_first(primary)
+            residual_p = primary_for_q
+            kv_input = self.secondary_proj_first(secondary)
+        else:
+            primary_for_q = primary
+            kv_input = secondary
+
+        q_proj_in = self.primary_proj(primary) if hasattr(self, 'primary_proj') else primary
+        kv_proj_in = self.secondary_proj(secondary) if hasattr(self, 'secondary_proj') else secondary
+
+        if hasattr(self, 'primary_proj_first'): # Check if we created specific projections
+             q_in = self.primary_proj_first(primary)
+             kv_source = self.secondary_proj_first(secondary)
+        else:
+             q_in = primary
+
+        residual_p = primary
+        q_potential = self.primary_proj(primary)
+        if primary.shape[-1] == self.dims:
+             residual_p = primary
+        else:
+             pass
+
+        primary_norm = self.attn_norm(primary)
+        secondary_norm = self.kv_norm(secondary)
+
+        Q = self.q_proj(primary_norm)
         
-        kv_proj = self.secondary_proj(secondary)
-        k_proj, v_proj = torch.split(kv_proj, self.dims, dim=-1)
+        kv_proj_normalized = self.secondary_proj(secondary_norm)
+        
+        secondary_norm_original_dim = nn.LayerNorm(secondary_feature_dim).to(secondary.device)(secondary)
+        kv_projected = self.secondary_proj(secondary_norm_original_dim)
+        K, V = torch.split(kv_projected, self.dims, dim=-1)
 
-        q_norm = self.primary_ln(q_proj)
-        k_norm = self.secondary_ln(k_proj)
-        v_norm = self.secondary_ln(v_proj)
-
-        residual_q = q_proj
-
-        Q = q_norm.view(batch_size, seq_len_p, self.num_heads, self.head_dim).transpose(1, 2)
-
-        K = k_norm.view(batch_size, seq_len_s, self.num_heads, self.head_dim).transpose(1, 2)
-
-        V = v_norm.view(batch_size, seq_len_s, self.num_heads, self.head_dim).transpose(1, 2)
+        Q = Q.view(batch_size, seq_len_p, self.num_heads, self.head_dim).transpose(1, 2)
+        K = K.view(batch_size, seq_len_s, self.num_heads, self.head_dim).transpose(1, 2)
+        V = V.view(batch_size, seq_len_s, self.num_heads, self.head_dim).transpose(1, 2)
 
         attn_scores = (Q @ K.transpose(-1, -2)) / self.scale
         attn_weights = self.softmax(attn_scores)
-        attn_weights = self.dropout(attn_weights)
+        attn_weights = self.attn_dropout(attn_weights)
 
         attn_output = attn_weights @ V
-
-        attn_output = attn_output.transpose(1, 2).contiguous()
-        attn_output = attn_output.view(batch_size, seq_len_p, self.dims)
-
+        attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len_p, self.dims)
         attn_output = self.out_proj(attn_output)
-        attn_output = self.dropout(attn_output)
 
-        primary_after_attn = residual_q + attn_output
+        primary_after_attn = primary + self.attn_dropout(attn_output)
 
-        ffn_output = self.ffn(primary_after_attn)
-        
-        primary_final = primary_after_attn + ffn_output
+        ffn_input = primary_after_attn
+        ffn_norm_out = self.ffn_norm(ffn_input)
+        ffn_out = self.ffn(ffn_norm_out)
+
+        primary_final = ffn_input + self.ffn_dropout(ffn_out)
 
         return primary_final
-
 
 class CrossModalTransformer(nn.Module):
     def __init__(self, primary_feature_dim: int, secondary_feature_dim: int, dims: int, num_heads: int, num_layers: int = 4, dropout: float = 0.1):
@@ -121,15 +157,35 @@ class CrossModalTransformer(nn.Module):
         self.num_layers = num_layers
         self.dims = dims
 
+        self.primary_input_proj = nn.Linear(primary_feature_dim, dims)
+        
+        self.secondary_input_proj = nn.Linear(secondary_feature_dim, dims)
+
+        self.initial_primary_norm = nn.LayerNorm(dims)
+        self.initial_secondary_norm = nn.LayerNorm(dims)
+
         self.layers = nn.ModuleList([])
-        self.layers.append(CrossModalTransformerLayer(dims, num_heads, primary_feature_dim, secondary_feature_dim, dropout=dropout))
-        for _ in range(num_layers - 1):
-            self.layers.append(CrossModalTransformerLayer(dims, num_heads, dims, secondary_feature_dim, dropout=dropout))
+        for _ in range(num_layers):
+            self.layers.append(CrossModalTransformerLayer(
+                dims=dims,
+                num_heads=num_heads,
+                primary_feature_dim=dims,
+                secondary_feature_dim=dims,
+                dropout=dropout
+            ))
+
+        self.final_norm = nn.LayerNorm(dims)
+
 
     def forward(self, primary: torch.Tensor, secondary: torch.Tensor) -> torch.Tensor:
-        primary_out = primary
+        primary_out = self.primary_input_proj(primary)
+        secondary_proj = self.secondary_input_proj(secondary)
+
+
         for layer in self.layers:
-            primary_out = layer(primary_out, secondary)
+            primary_out = layer(primary_out, secondary_proj)
+
+        primary_out = self.final_norm(primary_out)
 
         return primary_out
 
